@@ -1,0 +1,16 @@
+subscription_id                    = "00000000-0000-0000-0000-000000000000"
+project_name                       = "northstar"
+environment                        = "prod"
+location                           = "eastus"
+alert_email                        = "oncall@example.com"
+api_server_authorized_ip_ranges    = ["203.0.113.10/32"]
+aks_app_node_min_count             = 3
+aks_app_node_max_count             = 50
+app_min_replicas                   = 12
+app_max_replicas                   = 100
+app_cpu_target_percent             = 60
+p99_sla_ms                         = 750
+api_rate_limit_per_minute          = 1200
+postgres_sku_name                  = "GP_Standard_D8ds_v5"
+postgres_storage_mb                = 262144
+postgres_geo_redundant_backup_enabled = true
