@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { Pool } from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,10 @@ const PORT = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET || 'northstar-development-secret-change-me';
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataPath = path.join(dirname, 'data.json');
+const pool = process.env.DATABASE_URL ? new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSL === 'disable' ? false : { rejectUnauthorized: true }
+}) : null;
 app.use(cors());
 app.use(express.json());
 
@@ -44,19 +49,66 @@ function loadData() {
 }
 let database = loadData();
 function saveData() { fs.writeFileSync(dataPath, JSON.stringify(database, null, 2)); }
+async function initializeDatabase() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      email text NOT NULL UNIQUE,
+      password text NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS orders (
+      id text PRIMARY KEY,
+      user_id text NOT NULL REFERENCES users(id),
+      created_at timestamptz NOT NULL,
+      order_data jsonb NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS orders_user_created_idx ON orders (user_id, created_at DESC);
+  `);
+}
+async function findUserByEmail(email) {
+  if (!pool) return database.users.find(user => user.email === email);
+  const result = await pool.query('SELECT id, name, email, password FROM users WHERE email = $1', [email]);
+  return result.rows[0];
+}
+async function findUserById(id) {
+  if (!pool) return database.users.find(user => user.id === id);
+  const result = await pool.query('SELECT id, name, email, password FROM users WHERE id = $1', [id]);
+  return result.rows[0];
+}
+async function saveUser(user) {
+  if (!pool) { database.users.push(user); saveData(); return; }
+  await pool.query('INSERT INTO users (id, name, email, password) VALUES ($1, $2, $3, $4)', [user.id, user.name, user.email, user.password]);
+}
+async function findOrdersByUser(userId) {
+  if (!pool) return database.orders.filter(order => order.userId === userId).reverse();
+  const result = await pool.query('SELECT order_data FROM orders WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+  return result.rows.map(row => row.order_data);
+}
+async function saveOrder(order) {
+  if (!pool) { database.orders.push(order); saveData(); return; }
+  await pool.query('INSERT INTO orders (id, user_id, created_at, order_data) VALUES ($1, $2, $3, $4)', [order.id, order.userId, order.createdAt, order]);
+}
 function safeUser(user) { return { id: user.id, name: user.name, email: user.email }; }
 function tokenFor(user) { return jwt.sign({ id: user.id }, SECRET, { expiresIn: '7d' }); }
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   try {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
     const payload = jwt.verify(token, SECRET);
-    req.user = database.users.find(user => user.id === payload.id);
+    req.user = await findUserById(payload.id);
     if (!req.user) return res.status(401).json({ error: 'Account not found.' });
     next();
   } catch { return res.status(401).json({ error: 'Please sign in to continue.' }); }
 }
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', products: products.length }));
+app.get('/api/ready', async (_req, res) => {
+  try {
+    if (pool) await pool.query('SELECT 1');
+    res.json({ status: 'ready' });
+  } catch { res.status(503).json({ status: 'not-ready' }); }
+});
 app.get('/api/products', (req, res) => {
   const { category, search, sort, min, max } = req.query;
   let result = products.filter(product => (!category || category === 'All' || product.category === category)
@@ -71,20 +123,26 @@ app.post('/api/auth/register', async (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name?.trim() || !/^\S+@\S+\.\S+$/.test(email || '') || !password || password.length < 8)
     return res.status(400).json({ error: 'Enter your name, a valid email, and a password of at least 8 characters.' });
-  if (database.users.some(user => user.email === email.toLowerCase())) return res.status(409).json({ error: 'An account with this email already exists.' });
-  const user = { id: `user-${Date.now()}`, name: name.trim(), email: email.toLowerCase(), password: await bcrypt.hash(password, 10) };
-  database.users.push(user); saveData();
-  res.status(201).json({ token: tokenFor(user), user: safeUser(user) });
+  const normalizedEmail = email.toLowerCase();
+  if (await findUserByEmail(normalizedEmail)) return res.status(409).json({ error: 'An account with this email already exists.' });
+  const user = { id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: name.trim(), email: normalizedEmail, password: await bcrypt.hash(password, 10) };
+  try {
+    await saveUser(user);
+    res.status(201).json({ token: tokenFor(user), user: safeUser(user) });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'An account with this email already exists.' });
+    throw error;
+  }
 });
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
-  const user = database.users.find(entry => entry.email === String(email || '').toLowerCase());
+  const user = await findUserByEmail(String(email || '').toLowerCase());
   if (!user || !await bcrypt.compare(password || '', user.password)) return res.status(401).json({ error: 'Email or password is incorrect.' });
   res.json({ token: tokenFor(user), user: safeUser(user) });
 });
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: safeUser(req.user) }));
-app.get('/api/orders', requireAuth, (req, res) => res.json({ orders: database.orders.filter(order => order.userId === req.user.id).reverse() }));
-app.post('/api/orders', requireAuth, (req, res) => {
+app.get('/api/orders', requireAuth, async (req, res) => res.json({ orders: await findOrdersByUser(req.user.id) }));
+app.post('/api/orders', requireAuth, async (req, res) => {
   const { items, shipping } = req.body || {};
   if (!Array.isArray(items) || !items.length || items.length > 100) return res.status(400).json({ error: 'Your cart is empty.' });
   if (!shipping?.address?.trim() || !shipping?.city?.trim() || !shipping?.postalCode?.trim()) return res.status(400).json({ error: 'Complete the shipping address to place your order.' });
@@ -97,9 +155,14 @@ app.post('/api/orders', requireAuth, (req, res) => {
   if (!normalized.length) return res.status(400).json({ error: 'No valid products were found in your cart.' });
   const subtotal = normalized.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const order = { id: `NS-${Date.now().toString().slice(-8)}`, userId: req.user.id, items: normalized, subtotal, shippingCost: subtotal >= 75 ? 0 : 6, total: subtotal + (subtotal >= 75 ? 0 : 6), shipping, status: 'Confirmed', createdAt: new Date().toISOString() };
-  database.orders.push(order); saveData();
+  await saveOrder(order);
   res.status(201).json({ order });
 });
 
-if (process.env.NODE_ENV === 'production') app.use(express.static(path.join(dirname, '../dist')));
-app.listen(PORT, '0.0.0.0', () => console.log(`Northstar API listening on http://localhost:${PORT}`));
+if (process.env.NODE_ENV === 'production') app.use(express.static(path.join(dirname, '../dist'), { maxAge: '1y', immutable: true }));
+initializeDatabase().then(() => {
+  app.listen(PORT, '0.0.0.0', () => console.log(`Northstar API listening on http://localhost:${PORT}`));
+}).catch(error => {
+  console.error('Database initialization failed:', error);
+  process.exit(1);
+});
