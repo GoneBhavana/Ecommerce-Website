@@ -25,6 +25,13 @@ if (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
 }
 app.use(cors());
 app.use(express.json());
+if (process.env.ORIGIN_VERIFY_TOKEN) {
+  app.use((req, res, next) => {
+    if (req.path === '/api/health' || req.path === '/api/ready') return next();
+    if (req.get('x-northstar-origin') !== process.env.ORIGIN_VERIFY_TOKEN) return res.status(403).json({ error: 'Forbidden.' });
+    next();
+  });
+}
 
 const catalog = [
   ['Home', ['Arc table lamp', 'Stillwater vase', 'Cove cushion', 'Sunday throw', 'Pebble incense holder', 'Form ceramic bowl', 'Softline mirror', 'Everyday candle', 'Morrow clock', 'Dune side table'], ['photo-1600210492486-724fe5c67fb0', 'photo-1494438639946-1ebd1d20bf85', 'photo-1602874801007-bd458bb1b8b6', 'photo-1616486338812-3dadae4b4ace']],
@@ -166,7 +173,14 @@ app.post('/api/orders', requireAuth, async (req, res) => {
   res.status(201).json({ order });
 });
 
-if (process.env.NODE_ENV === 'production') app.use(express.static(path.join(dirname, '../dist'), { maxAge: '1y', immutable: true }));
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(dirname, '../dist'), {
+    setHeaders(res, filePath) {
+      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store');
+      else res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  }));
+}
 initializeDatabase().then(() => {
   app.listen(PORT, '0.0.0.0', () => console.log(`Northstar API listening on http://localhost:${PORT}`));
 }).catch(error => {
