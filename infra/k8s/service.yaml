@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: northstar-web
+  namespace: northstar
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: "${RESOURCE_GROUP_NAME}"
+    service.beta.kubernetes.io/azure-pip-name: "${INGRESS_PUBLIC_IP_NAME}"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: /api/health
+spec:
+  type: LoadBalancer
+  loadBalancerIP: "${INGRESS_PUBLIC_IP}"
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: northstar-web
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
